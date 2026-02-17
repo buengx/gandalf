@@ -1,20 +1,19 @@
 export default {
   async fetch(request, env, ctx) {
-    const proxyBase = "https://convex.buengx.workers.dev/?url=";
     const workerUrl = new URL(request.url);
     const encodedUrl = workerUrl.searchParams.get('url');
 
     // Default to Google if no URL is provided
     if (!encodedUrl) {
-      const defaultB64 = btoa("https://www.google.com/").replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      return Response.redirect(proxyBase + defaultB64, 302);
+      const defaultB64 = btoa("https://www.google.com/").replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
+      return Response.redirect(`https://convex.buengx.workers.dev/?url=${defaultB64}`, 302);
     }
 
     try {
       const decodedUrl = atob(encodedUrl.replace(/-/g, '+').replace(/_/g, '/'));
       const targetUrl = new URL(decodedUrl);
 
-      // 1. Prepare Request (Forwarding all search params and cookies)
+      // Prepare Request
       const modifiedRequest = new Request(decodedUrl, {
         method: request.method,
         headers: {
@@ -24,38 +23,39 @@ export default {
           "Cookie": request.headers.get("Cookie"),
           "Referer": "https://www.google.com/"
         },
-        // Forward the search body if it's a POST request
         body: (request.method === "POST" || request.method === "PUT") ? request.body : null,
         redirect: "manual"
       });
 
       const response = await fetch(modifiedRequest);
 
-      // 2. Handle Search Redirects (Google often redirects /search to specialized paths)
+      // Handle redirects
       if ([301, 302, 307, 308].includes(response.status)) {
         const loc = response.headers.get("Location");
         if (loc) {
           const absolute = new URL(loc, decodedUrl).href;
-          const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-          return Response.redirect(proxyBase + b64, 302);
+          const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
+          return Response.redirect(`https://convex.buengx.workers.dev/?url=${b64}`, 302);
         }
       }
 
       const contentType = response.headers.get("Content-Type") || "";
 
-      // 3. Process HTML for Search Results
+      // Process HTML - DON'T rewrite URLs, let browser request them directly
       if (contentType.includes("text/html")) {
         let text = await response.text();
 
-        // Regex for deep replacement of Google's internal search links
-        const modifiedText = text.replace(/(https?:\/\/[^\s'"><]+|(?<=src="|href="|url\()\/[^\s'"><)]+)/g, (match) => {
+        // Only rewrite if it's NOT already proxied
+        const modifiedText = text.replace(/(https?:\/\/[^\s'\"><]+|(?<=src=\"|href=\"|url\()\/[^\s'\"><]+)/g, (match) => {
           try {
-            // Avoid double-proxying
-            if (match.includes("convex.buengx.workers.dev")) return match;
+            // Skip if already proxied through convex or gandalf
+            if (match.includes("convex.buengx.workers.dev") || match.includes("gandalf.buengx.workers.dev")) {
+              return match;
+            }
             
             const absolute = new URL(match, decodedUrl).href;
-            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-            return proxyBase + b64;
+            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
+            return `https://convex.buengx.workers.dev/?url=${b64}`;
           } catch (e) {
             return match;
           }
@@ -66,7 +66,6 @@ export default {
         newHeaders.delete("Content-Security-Policy");
         newHeaders.delete("X-Frame-Options");
         
-        // Ensure cookies (Consent/Search preferences) are passed back to the user
         const setCookie = response.headers.get("Set-Cookie");
         if (setCookie) newHeaders.set("Set-Cookie", setCookie);
 
@@ -76,7 +75,7 @@ export default {
         });
       }
 
-      // 4. Return everything else (Images/JS/CSS) as-is
+      // Return non-HTML as-is
       return response;
 
     } catch (e) {
