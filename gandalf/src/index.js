@@ -1,16 +1,72 @@
-export default async function handler(req, res) {
-    const now = new Date();
-    const startTime = new Date('2026-02-17T23:25:39Z');
-    const expirationTime = new Date(startTime.getTime() + 60 * 1000); // 1 minute expiration
+export default {
+  async fetch(request, env) {
+    try {
+      const url = new URL(request.url);
+      const SECRET_SALT = env.GATEKEEPER_SECRET || "mylifeisalie";
+      const NOPE_LIST = ["cstv", "csv", "tsv"];
 
-    if (now < startTime || now > expirationTime) {
-        return res.status(401).json({ error: 'Authentication failed: Time-based password has expired.' });
+      // --- TIME KEY CALCULATION ---
+      let timeKey;
+      try {
+        const aest = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Australia/Sydney',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', hour12: false
+        }).format(new Date());
+
+        const [date, hour] = aest.split(', ');
+        const [d, m, y] = date.split('/');
+        timeKey = `${y}-${m}-${d}T${hour}`;
+      } catch (timeError) {
+        return new Response("Time Formatting Error: " + timeError.message, { status: 500 });
+      }
+
+      // --- AUTH CHECK ---
+      const dailyPassword = await generateCode(timeKey + SECRET_SALT);
+      const userPass = url.searchParams.get("pw");
+
+      if (!userPass || userPass !== dailyPassword) {
+        return new Response("Forbidden: Check your PW.", { status: 403 });
+      }
+
+      // --- URL DECODING ---
+      const b64Param = url.searchParams.get("url");
+      if (!b64Param) return new Response("Error: No URL param.", { status: 400 });
+
+      let targetStr;
+      try {
+        targetStr = atob(b64Param).trim();
+        if (!targetStr.startsWith("http")) targetStr = "https://" + targetStr;
+      } catch (b64Error) {
+        return new Response("Base64 Decode Error: " + b64Error.message, { status: 400 });
+      }
+
+      // --- PROXY LOGIC ---
+      const targetUrl = new URL(targetStr);
+      if (NOPE_LIST.some(word => targetUrl.hostname.toLowerCase().includes(word))) {
+        return new Response("Nope.", { status: 403 });
+      }
+
+      const newHeaders = new Headers(request.headers);
+      newHeaders.set("Host", targetUrl.hostname);
+
+      return fetch(new Request(targetUrl, {
+        method: request.method,
+        headers: newHeaders,
+        body: request.body,
+        redirect: "follow"
+      }));
+
+    } catch (globalError) {
+      // THIS WILL TELL YOU EXACTLY WHAT HAPPENED
+      return new Response("CRITICAL EXCEPTION: " + globalError.stack, { status: 500 });
     }
+  }
+};
 
-    // Proxy logic (assuming you have a proxy mechanism set up)
-    const targetUrl = 'https://example.com/api';
-    const response = await fetch(targetUrl);
-    const data = await response.json();
-
-    return res.status(200).json(data);
+async function generateCode(message) {
+  const msgUint8 = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("").substring(0, 8);
 }
