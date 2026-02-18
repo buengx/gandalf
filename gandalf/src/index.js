@@ -50,15 +50,25 @@ export default {
       const newHeaders = new Headers(request.headers);
       newHeaders.set("Host", targetUrl.hostname);
 
-      return fetch(new Request(targetUrl, {
+      const proxyResponse = await fetch(new Request(targetUrl, {
         method: request.method,
         headers: newHeaders,
         body: request.body,
         redirect: "follow"
       }));
 
+      // Check if Convex sent a redirect signal
+      const redirectTo = proxyResponse.headers.get("X-Redirect-To");
+      if (redirectTo) {
+        // Preserve pw in the redirect
+        const redirectUrl = new URL(redirectTo);
+        redirectUrl.searchParams.set("pw", userPass);
+        return Response.redirect(redirectUrl.toString(), 302);
+      }
+
+      return proxyResponse;
+
     } catch (globalError) {
-      // THIS WILL TELL YOU EXACTLY WHAT HAPPENED
       return new Response("CRITICAL EXCEPTION: " + globalError.stack, { status: 500 });
     }
   }

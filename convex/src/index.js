@@ -5,7 +5,7 @@ export default {
 
     // Default to Google if no URL is provided
     if (!encodedUrl) {
-      const defaultB64 = btoa("https://www.google.com/").replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
+      const defaultB64 = btoa("https://www.google.com/").replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
       return Response.redirect(`https://convex.buengx.workers.dev/?url=${defaultB64}`, 302);
     }
 
@@ -29,24 +29,31 @@ export default {
 
       const response = await fetch(modifiedRequest);
 
-      // Handle redirects
+      // Handle redirects - pass back to caller with X-Redirect-To header
       if ([301, 302, 307, 308].includes(response.status)) {
         const loc = response.headers.get("Location");
         if (loc) {
           const absolute = new URL(loc, decodedUrl).href;
-          const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
-          return Response.redirect(`https://convex.buengx.workers.dev/?url=${b64}`, 302);
+          const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+          
+          const redirectHeaders = new Headers();
+          redirectHeaders.set("X-Redirect-To", `https://convex.buengx.workers.dev/?url=${b64}`);
+          
+          return new Response(null, {
+            status: response.status,
+            headers: redirectHeaders
+          });
         }
       }
 
       const contentType = response.headers.get("Content-Type") || "";
 
-      // Process HTML - DON'T rewrite URLs, let browser request them directly
+      // Process HTML
       if (contentType.includes("text/html")) {
         let text = await response.text();
 
         // Only rewrite if it's NOT already proxied
-        const modifiedText = text.replace(/(https?:\/\/[^\s'\"><]+|(?<=src=\"|href=\"|url\()\/[^\s'\"><]+)/g, (match) => {
+        const modifiedText = text.replace(/(https?:\/\/[^\s'"<>]+|(?<=src=\"|href=\"|url\()\/[^\s'"<>]+)/g, (match) => {
           try {
             // Skip if already proxied through convex or gandalf
             if (match.includes("convex.buengx.workers.dev") || match.includes("gandalf.buengx.workers.dev")) {
@@ -54,7 +61,7 @@ export default {
             }
             
             const absolute = new URL(match, decodedUrl).href;
-            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\/g, '_').replace(/=+$/, '');
+            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
             return `https://convex.buengx.workers.dev/?url=${b64}`;
           } catch (e) {
             return match;
