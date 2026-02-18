@@ -25,7 +25,7 @@ export default {
       const userPass = url.searchParams.get("pw");
 
       if (!userPass || userPass !== dailyPassword) {
-        return new Response("Forbidden: Check your PW.", { status: 403 });
+        return new Response("Forbidden: Check your PW. Expected: " + dailyPassword + " Got: " + userPass, { status: 403 });
       }
 
       // --- CATCH-ALL: Forward everything to Convex ---
@@ -43,12 +43,14 @@ export default {
         convexUrl = `https://convex.buengx.workers.dev/?url=${b64}`;
       }
 
-      // Forward to Convex
-      return fetch(convexUrl, {
+      // Forward to Convex and return response
+      const convexResponse = await fetch(convexUrl, {
         method: request.method,
         headers: request.headers,
         body: request.body
       });
+
+      return convexResponse;
 
     } catch (globalError) {
       return new Response("CRITICAL EXCEPTION: " + globalError.stack, { status: 500 });
