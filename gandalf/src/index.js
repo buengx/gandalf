@@ -3,7 +3,6 @@ export default {
     try {
       const url = new URL(request.url);
       const SECRET_SALT = env.GATEKEEPER_SECRET || "mylifeisalie";
-      const NOPE_LIST = ["cstv", "csv", "tsv"];
 
       // --- TIME KEY CALCULATION ---
       let timeKey;
@@ -29,44 +28,27 @@ export default {
         return new Response("Forbidden: Check your PW.", { status: 403 });
       }
 
-      // --- URL DECODING ---
+      // --- CATCH-ALL: Forward everything to Convex ---
       const b64Param = url.searchParams.get("url");
-      if (!b64Param) return new Response("Error: No URL param.", { status: 400 });
+      let convexUrl;
 
-      let targetStr;
-      try {
-        targetStr = atob(b64Param).trim();
-        if (!targetStr.startsWith("http")) targetStr = "https://" + targetStr;
-      } catch (b64Error) {
-        return new Response("Base64 Decode Error: " + b64Error.message, { status: 400 });
+      if (b64Param) {
+        // Already has URL param, just pass to convex
+        convexUrl = `https://convex.buengx.workers.dev/?url=${b64Param}`;
+      } else {
+        // Catch-all: reconstruct target URL from path + query (minus pw)
+        const queryWithoutPw = url.search.replace(/[?&]pw=[^&]*/g, '').replace(/^&/, '?');
+        const reconstructedUrl = `https://www.google.com${url.pathname}${queryWithoutPw}`;
+        const b64 = btoa(reconstructedUrl).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        convexUrl = `https://convex.buengx.workers.dev/?url=${b64}`;
       }
 
-      // --- PROXY LOGIC ---
-      const targetUrl = new URL(targetStr);
-      if (NOPE_LIST.some(word => targetUrl.hostname.toLowerCase().includes(word))) {
-        return new Response("Nope.", { status: 403 });
-      }
-
-      const newHeaders = new Headers(request.headers);
-      newHeaders.set("Host", targetUrl.hostname);
-
-      const proxyResponse = await fetch(new Request(targetUrl, {
+      // Forward to Convex
+      return fetch(convexUrl, {
         method: request.method,
-        headers: newHeaders,
-        body: request.body,
-        redirect: "follow"
-      }));
-
-      // Check if Convex sent a redirect signal
-      const redirectTo = proxyResponse.headers.get("X-Redirect-To");
-      if (redirectTo) {
-        // Preserve pw in the redirect
-        const redirectUrl = new URL(redirectTo);
-        redirectUrl.searchParams.set("pw", userPass);
-        return Response.redirect(redirectUrl.toString(), 302);
-      }
-
-      return proxyResponse;
+        headers: request.headers,
+        body: request.body
+      });
 
     } catch (globalError) {
       return new Response("CRITICAL EXCEPTION: " + globalError.stack, { status: 500 });

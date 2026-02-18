@@ -11,54 +11,31 @@ export default {
 
     try {
       const decodedUrl = atob(encodedUrl.replace(/-/g, '+').replace(/_/g, '/'));
-      const targetUrl = new URL(decodedUrl);
 
-      // Prepare Request
-      const modifiedRequest = new Request(decodedUrl, {
+      // Fetch the target
+      const response = await fetch(decodedUrl, {
         method: request.method,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
           "Accept": request.headers.get("Accept"),
           "Accept-Language": request.headers.get("Accept-Language"),
           "Cookie": request.headers.get("Cookie"),
-          "Referer": "https://www.google.com/"
+          "Referer": decodedUrl
         },
         body: (request.method === "POST" || request.method === "PUT") ? request.body : null,
-        redirect: "manual"
+        redirect: "follow"
       });
-
-      const response = await fetch(modifiedRequest);
-
-      // Handle redirects - pass back to caller with X-Redirect-To header
-      if ([301, 302, 307, 308].includes(response.status)) {
-        const loc = response.headers.get("Location");
-        if (loc) {
-          const absolute = new URL(loc, decodedUrl).href;
-          const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-          
-          const redirectHeaders = new Headers();
-          redirectHeaders.set("X-Redirect-To", `https://convex.buengx.workers.dev/?url=${b64}`);
-          
-          return new Response(null, {
-            status: response.status,
-            headers: redirectHeaders
-          });
-        }
-      }
 
       const contentType = response.headers.get("Content-Type") || "";
 
-      // Process HTML
+      // Handle HTML - rewrite URLs to point to Convex (NOT Gandalf)
       if (contentType.includes("text/html")) {
         let text = await response.text();
 
-        // Only rewrite if it's NOT already proxied
-        const modifiedText = text.replace(/(https?:\/\/[^\s'"<>]+|(?<=src=\"|href=\"|url\()\/[^\s'"<>]+)/g, (match) => {
+        // Rewrite all URLs to go through Convex
+        const modifiedText = text.replace(/(https?:\/\/[^\s'"<>]+|(?<=src=|href=|action=|url\()\/[^\s'"<>]+)/g, (match) => {
           try {
-            // Skip if already proxied through convex or gandalf
-            if (match.includes("convex.buengx.workers.dev") || match.includes("gandalf.buengx.workers.dev")) {
-              return match;
-            }
+            if (match.includes("convex.buengx.workers.dev")) return match;
             
             const absolute = new URL(match, decodedUrl).href;
             const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -72,6 +49,7 @@ export default {
         newHeaders.set("Access-Control-Allow-Origin", "*");
         newHeaders.delete("Content-Security-Policy");
         newHeaders.delete("X-Frame-Options");
+        newHeaders.delete("Content-Length");
         
         const setCookie = response.headers.get("Set-Cookie");
         if (setCookie) newHeaders.set("Set-Cookie", setCookie);
@@ -82,11 +60,28 @@ export default {
         });
       }
 
-      // Return non-HTML as-is
-      return response;
+      // Handle streams (text/event-stream, application/octet-stream, etc.)
+      if (contentType.includes("text/event-stream") || contentType.includes("stream")) {
+        const newHeaders = new Headers(response.headers);
+        newHeaders.set("Access-Control-Allow-Origin", "*");
+        
+        return new Response(response.body, {
+          status: response.status,
+          headers: newHeaders
+        });
+      }
+
+      // Return everything else (images, CSS, JS, etc.) as-is
+      const newHeaders = new Headers(response.headers);
+      newHeaders.set("Access-Control-Allow-Origin", "*");
+      
+      return new Response(response.body, {
+        status: response.status,
+        headers: newHeaders
+      });
 
     } catch (e) {
-      return new Response("Search Error: " + e.message, { status: 500 });
+      return new Response("Proxy Error: " + e.message, { status: 500 });
     }
   }
 };
