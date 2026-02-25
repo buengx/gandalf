@@ -10,7 +10,9 @@ export default {
     }
 
     try {
-      const decodedUrl = atob(encodedUrl.replace(/-/g, '+').replace(/_/g, '/'));
+      // Restore stripped base64 padding before decoding
+      const padded = encodedUrl + '='.repeat((4 - encodedUrl.length % 4) % 4);
+      const decodedUrl = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
 
       // Fetch the target
       const response = await fetch(decodedUrl, {
@@ -32,13 +34,24 @@ export default {
       if (contentType.includes("text/html")) {
         let text = await response.text();
 
-        // Rewrite all URLs to go through Convex
-        const modifiedText = text.replace(/(https?:\/\/[^\s'"<>]+|(?<=src=|href=|action=|url\()\/[^\s'"<>]+)/g, (match) => {
+        // Pass 1: rewrite URLs inside quoted HTML attributes (src, href, action)
+        text = text.replace(/((?:src|href|action)\s*=\s*["'])([^"']+)(["'])/gi, (match, prefix, urlVal, suffix) => {
+          try {
+            if (/^(javascript:|data:|mailto:|#)/.test(urlVal)) return match;
+            if (urlVal.includes("convex.buengx.workers.dev")) return match;
+            const absolute = new URL(urlVal, decodedUrl).href;
+            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            return `${prefix}https://convex.buengx.workers.dev/?url=${b64}${suffix}`;
+          } catch (e) {
+            return match;
+          }
+        });
+
+        // Pass 2: rewrite remaining absolute URLs (inline CSS, JS strings, etc.)
+        const modifiedText = text.replace(/https?:\/\/[^\s'"<>)]+/g, (match) => {
           try {
             if (match.includes("convex.buengx.workers.dev")) return match;
-            
-            const absolute = new URL(match, decodedUrl).href;
-            const b64 = btoa(absolute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            const b64 = btoa(match).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
             return `https://convex.buengx.workers.dev/?url=${b64}`;
           } catch (e) {
             return match;
