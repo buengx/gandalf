@@ -44,10 +44,14 @@ export default {
       }
 
       // Forward to Convex and return response
+      // Strip 'host' so Cloudflare routes the subrequest correctly, and only
+      // send a body for methods that actually have one.
+      const fwdHeaders = new Headers(request.headers);
+      fwdHeaders.delete('host');
       const convexResponse = await fetch(convexUrl, {
         method: request.method,
-        headers: request.headers,
-        body: request.body
+        headers: fwdHeaders,
+        body: (request.method === "POST" || request.method === "PUT") ? request.body : null
       });
 
       return convexResponse;

@@ -1,0 +1,54 @@
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-convex:
+    name: Deploy convex worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: convex
+
+  deploy-gandalf:
+    name: Deploy gandalf worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: gandalf
+
+  verify:
+    name: Wait for propagation and verify
+    runs-on: ubuntu-latest
+    needs: [deploy-convex, deploy-gandalf]
+    permissions: {}
+    steps:
+      - name: Wait 2 minutes for workers to propagate
+        run: sleep 120
+
+      - name: Smoke-test gandalf worker
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://gandalf.buengx.workers.dev/")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" = "403" ]; then
+            echo "Worker is up (auth required as expected)"
+          else
+            echo "Unexpected status $STATUS" && exit 1
+          fi
