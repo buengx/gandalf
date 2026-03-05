@@ -12,6 +12,17 @@ const HOP_BY_HOP_HEADERS = new Set([
   'host',
 ]);
 
+const ALWAYS_TEXT_TYPES = [
+  'text/',
+  'application/javascript',
+  'application/x-javascript',
+  'application/ecmascript',
+  'application/json',
+  'application/xml',
+  'application/xhtml+xml',
+  'image/svg+xml',
+];
+
 function decodeBase64UrlToString(input) {
   if (!input) return '';
 
@@ -58,13 +69,11 @@ function filterRequestHeaders(inHeaders) {
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
     if (HOP_BY_HOP_HEADERS.has(key)) continue;
-    // Don't forward CF-specific or encoding negotiation that can cause weirdness.
     if (key.startsWith('cf-')) continue;
     if (key === 'accept-encoding') continue;
     out.set(k, v);
   }
 
-  // Set a predictable UA (some origins reject empty/worker UA).
   if (!out.has('user-agent')) {
     out.set('user-agent', 'convex-worker-proxy/1.0');
   }
@@ -77,27 +86,112 @@ function filterResponseHeaders(inHeaders) {
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
     if (HOP_BY_HOP_HEADERS.has(key)) continue;
-    // Let Cloudflare handle these.
     if (key === 'content-encoding') continue;
     if (key === 'content-length') continue;
     out.set(k, v);
   }
-  return corsifyHeaders(out);
+  return out;
+}
+
+function isTextLikeContentType(contentType) {
+  if (!contentType) return false;
+  const ct = contentType.toLowerCase().split(';', 1)[0].trim();
+  return ALWAYS_TEXT_TYPES.some((p) => (p.endsWith('/') ? ct.startsWith(p) : ct === p));
+}
+
+function b64urlEncodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function convexUrlFor(targetUrl, requestOrigin) {
+  // Force same worker origin so everything stays on convex.
+  const base = new URL(requestOrigin);
+  base.search = '';
+  base.hash = '';
+  base.pathname = '/';
+  base.searchParams.set('url', b64urlEncodeUtf8(targetUrl));
+  return base.toString();
+}
+
+function absolutizeAndConvexify(raw, baseUrl, requestOrigin) {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+
+  // Ignore non-navigational/unsupported schemes.
+  if (/^(data:|mailto:|tel:|javascript:|about:|blob:)/i.test(trimmed)) return raw;
+
+  // Keep fragments as-is (but still point through convex). Most browsers expect same-document anchors.
+  if (trimmed.startsWith('#')) return raw;
+
+  let absolute;
+  try {
+    absolute = new URL(trimmed, baseUrl).toString();
+  } catch {
+    return raw;
+  }
+
+  return convexUrlFor(absolute, requestOrigin);
+}
+
+function rewriteCss(text, baseUrl, requestOrigin) {
+  // url(...) patterns
+  text = text.replace(/url\(\s*(['"]?)([^'\)]+)\1\s*\)/gi, (m, q, u) => {
+    const nu = absolutizeAndConvexify(u, baseUrl, requestOrigin);
+    if (nu === u) return m;
+    const quote = q || '"';
+    return `url(${quote}${nu}${quote})`;
+  });
+
+  // @import '...'
+  text = text.replace(/@import\s+(['"])([^'"]+)\1/gi, (m, q, u) => {
+    const nu = absolutizeAndConvexify(u, baseUrl, requestOrigin);
+    if (nu === u) return m;
+    return `@import ${q}${nu}${q}`;
+  });
+
+  return text;
+}
+
+function rewriteHtml(text, baseUrl, requestOrigin) {
+  // Extremely naive attribute rewriting; good enough for simple pages.
+  // href/src/action/poster
+  text = text.replace(/\s(href|src|action|poster)=(['"])([^'\"]+)\2/gi, (m, attr, q, u) => {
+    const nu = absolutizeAndConvexify(u, baseUrl, requestOrigin);
+    if (nu === u) return m;
+    return ` ${attr}=${q}${nu}${q}`;
+  });
+
+  // srcset="url 1x, url 2x"
+  text = text.replace(/\ssrcset=(['"])([^'\"]+)\1/gi, (m, q, val) => {
+    const parts = val.split(',').map((p) => p.trim()).filter(Boolean);
+    const rewritten = parts.map((p) => {
+      const [u, ...rest] = p.split(/\s+/);
+      const nu = absolutizeAndConvexify(u, baseUrl, requestOrigin);
+      return [nu, ...rest].join(' ');
+    }).join(', ');
+    return ` srcset=${q}${rewritten}${q}`;
+  });
+
+  return text;
 }
 
 async function handleRequest(request) {
-  const url = new URL(request.url);
+  const reqUrl = new URL(request.url);
 
   // Preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsifyHeaders(new Headers()) });
   }
 
-  const raw = (url.searchParams.get('url') || '').trim().replace(/^"|"$/g, '');
+  const raw = (reqUrl.searchParams.get('url') || '').trim().replace(/^"|"$/g, '');
   if (!raw) {
     return new Response('Missing url parameter', { status: 400, headers: corsifyHeaders(new Headers()) });
   }
 
+  // ?url= can be plain URL or base64/base64url
   let target = raw;
   if (!looksLikeUrl(target)) {
     const decoded = decodeBase64UrlToString(target).trim().replace(/^"|"$/g, '');
@@ -121,7 +215,6 @@ async function handleRequest(request) {
     redirect: 'follow',
   };
 
-  // Only attach body for methods that can have one.
   if (!['GET', 'HEAD'].includes(request.method)) {
     init.body = request.body;
   }
@@ -136,13 +229,42 @@ async function handleRequest(request) {
     });
   }
 
-  const headers = filterResponseHeaders(resp.headers);
+  const contentType = resp.headers.get('content-type') || '';
+  const status = resp.status;
 
-  return new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers,
-  });
+  // For binary content, just stream through.
+  if (!isTextLikeContentType(contentType)) {
+    const headers = corsifyHeaders(filterResponseHeaders(resp.headers));
+    return new Response(resp.body, { status, statusText: resp.statusText, headers });
+  }
+
+  // Text content: rewrite links.
+  let text;
+  try {
+    text = await resp.text();
+  } catch (e) {
+    const headers = corsifyHeaders(filterResponseHeaders(resp.headers));
+    return new Response(resp.body, { status, statusText: resp.statusText, headers });
+  }
+
+  const requestOrigin = reqUrl.origin;
+  const baseUrl = targetUrl.toString();
+  const ct = contentType.toLowerCase();
+
+  if (ct.includes('text/html') || ct.includes('application/xhtml+xml')) {
+    text = rewriteHtml(text, baseUrl, requestOrigin);
+  } else if (ct.includes('text/css')) {
+    text = rewriteCss(text, baseUrl, requestOrigin);
+  } else if (ct.includes('application/javascript') || ct.includes('text/javascript') || ct.includes('application/x-javascript')) {
+    // JS rewriting is hard; leave as-is.
+  } else if (ct.includes('image/svg+xml')) {
+    // SVG can contain href/xlink:href, but we keep it simple.
+  }
+
+  const headers = corsifyHeaders(filterResponseHeaders(resp.headers));
+  headers.set('content-type', contentType);
+
+  return new Response(text, { status, statusText: resp.statusText, headers });
 }
 
 export default {
