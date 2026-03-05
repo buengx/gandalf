@@ -1,40 +1,46 @@
 export default {
   async fetch(request, env, ctx) {
     const workerUrl = new URL(request.url);
-    const encodedUrl = workerUrl.searchParams.get('url');
+    const encodedUrl = workerUrl.searchParams.get("url");
 
     // Default to Google if no URL is provided
     if (!encodedUrl) {
       const defaultB64 = btoa("https://www.google.com/")
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-      return Response.redirect(`https://convex.buengx.workers.dev/?url=${defaultB64}`, 302);
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+      return Response.redirect(
+        `https://convex.buengx.workers.dev/?url=${defaultB64}`,
+        302
+      );
     }
 
     try {
-      const decodedUrl = atob(encodedUrl.replace(/-/g, '+').replace(/_/g, '/'));
+      const decodedUrl = atob(encodedUrl.replace(/-/g, "+").replace(/_/g, "/"));
 
       // Fetch the target
       const response = await fetch(decodedUrl, {
         method: request.method,
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-          "Accept": request.headers.get("Accept"),
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+          Accept: request.headers.get("Accept"),
           "Accept-Language": request.headers.get("Accept-Language"),
-          "Cookie": request.headers.get("Cookie"),
-          "Referer": decodedUrl
+          Cookie: request.headers.get("Cookie"),
+          Referer: decodedUrl,
         },
-        body: (request.method === "POST" || request.method === "PUT") ? request.body : null,
-        redirect: "follow"
+        body:
+          request.method === "POST" || request.method === "PUT"
+            ? request.body
+            : null,
+        redirect: "follow",
       });
 
       const contentType = response.headers.get("Content-Type") || "";
 
       // Handle HTML - rewrite URLs to point to Convex (NOT Gandalf)
       if (contentType.includes("text/html")) {
-        let text = await response.text();
-
+        const text = await response.text();
         const CONVEX_ORIGIN = "https://convex.buengx.workers.dev";
 
         const toConvexUrl = (raw) => {
@@ -43,7 +49,8 @@ export default {
             const trimmed = String(raw).trim();
 
             // Ignore non-fetchable / special schemes / fragments
-            if (/^(data:|mailto:|javascript:|tel:|about:|blob:|#)/i.test(trimmed)) return raw;
+            if (/^(data:|mailto:|javascript:|tel:|about:|blob:|#)/i.test(trimmed))
+              return raw;
 
             // Avoid double-wrapping convex links
             if (trimmed.includes("convex.buengx.workers.dev")) return raw;
@@ -72,21 +79,38 @@ export default {
             }
 
             const b64 = btoa(absolute)
-              .replace(/\+/g, '-')
-              .replace(/\//g, '_')
-              .replace(/=+$/, '');
+              .replace(/\+/g, "-")
+              .replace(/\//g, "_")
+              .replace(/=+$/, "");
             return `${CONVEX_ORIGIN}/?url=${b64}`;
           } catch {
             return raw;
           }
         };
 
-        const modifiedText = text.replace(
-          /(https?:\/\/[^\s"'<>]+|\/[^"]*|(?<=src=|href=|action=|poster=|data-src=|data-href=|data-url=|content=)[^"']*|(?<=url\()\s*[^\s"'<>]*\s*(?=\))/g,
-          (match) => {
-            const cleaned = match.trim().replace(/^['"]|['"]$/g, '');
-            return toConvexUrl(cleaned);
-          }
+        const rewriteAttr = (whole, prefix, value, suffix) => {
+          const cleaned = value.trim().replace(/^['"]|['"]$/g, "");
+          return `${prefix}${toConvexUrl(cleaned)}${suffix}`;
+        };
+
+        // 1) Rewrite common HTML attrs that contain URLs (no lookbehind)
+        // Matches: src="...", href='...', action=..., poster=..., data-src=..., etc.
+        let modifiedText = text.replace(
+          /(\b(?:src|href|action|poster|data-src|data-href|data-url|content)\s*=\s*)(["']?)([^"'\s>]+)\2/gi,
+          (whole, prefix, quote, value) => rewriteAttr(whole, prefix, value, quote)
+        );
+
+        // 2) Rewrite CSS url(...) (no lookbehind)
+        // Matches: url(test.jpg) url("test.jpg") url('test.jpg')
+        modifiedText = modifiedText.replace(
+          /(url\(\s*)(["']?)([^"')\s][^"')]*?)\2(\s*\))/gi,
+          (whole, prefix, quote, value, suffix) =>
+            `${prefix}${quote}${toConvexUrl(value)}${quote}${suffix}`
+        );
+
+        // 3) Rewrite plain absolute URLs in text as a fallback (optional)
+        modifiedText = modifiedText.replace(/https?:\/\/[^\s"'<>]+/g, (u) =>
+          toConvexUrl(u)
         );
 
         const newHeaders = new Headers(response.headers);
@@ -100,7 +124,7 @@ export default {
 
         return new Response(modifiedText, {
           status: response.status,
-          headers: newHeaders
+          headers: newHeaders,
         });
       }
 
@@ -111,7 +135,7 @@ export default {
 
         return new Response(response.body, {
           status: response.status,
-          headers: newHeaders
+          headers: newHeaders,
         });
       }
 
@@ -121,11 +145,10 @@ export default {
 
       return new Response(response.body, {
         status: response.status,
-        headers: newHeaders
+        headers: newHeaders,
       });
-
     } catch (e) {
       return new Response("Proxy Error: " + e.message, { status: 500 });
     }
-  }
+  },
 };
