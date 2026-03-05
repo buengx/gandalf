@@ -1,9 +1,17 @@
 'use strict';
 
-/**
- * Decode a base64/base64url-encoded string into a UTF-8 string.
- * Accepts standard base64 (+/) and base64url (-_). Adds padding if missing.
- */
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'host',
+]);
+
 function decodeBase64UrlToString(input) {
   if (!input) return '';
 
@@ -14,8 +22,10 @@ function decodeBase64UrlToString(input) {
     s = input;
   }
 
+  // base64url -> base64
   s = s.replace(/-/g, '+').replace(/_/g, '/');
 
+  // padding
   const pad = s.length % 4;
   if (pad === 2) s += '==';
   else if (pad === 3) s += '=';
@@ -31,36 +41,110 @@ function decodeBase64UrlToString(input) {
   }
 }
 
-async function handleRequest(request) {
-  const { searchParams } = new URL(request.url);
-
-  // Support either:
-  // - ?url=<normal URL>
-  // - ?url_b64=<base64/base64url of URL>
-  const rawUrl = (searchParams.get('url') || '').trim().replace(/^"|"$/g, '');
-  const rawUrlB64 = (searchParams.get('url_b64') || '').trim().replace(/^"|"$/g, '');
-
-  let targetUrl = rawUrl;
-  if (!targetUrl && rawUrlB64) {
-    targetUrl = decodeBase64UrlToString(rawUrlB64).trim().replace(/^"|"$/g, '');
-  }
-
-  if (!targetUrl) {
-    return new Response('Missing url parameter (use ?url=... or ?url_b64=...)', { status: 400 });
-  }
-
-  let parsed;
-  try {
-    parsed = new URL(targetUrl);
-  } catch {
-    return new Response('Invalid url parameter', { status: 400 });
-  }
-
-  // TODO: your actual logic goes here.
-  return new Response(`OK: ${parsed.toString()}`);
+function looksLikeUrl(s) {
+  return /^https?:\/\//i.test(s);
 }
 
-// This is the actual Worker entrypoint Wrangler/Cloudflare is looking for.
+function corsifyHeaders(headers) {
+  headers.set('access-control-allow-origin', '*');
+  headers.set('access-control-allow-methods', 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS');
+  headers.set('access-control-allow-headers', '*');
+  headers.set('access-control-max-age', '86400');
+  return headers;
+}
+
+function filterRequestHeaders(inHeaders) {
+  const out = new Headers();
+  for (const [k, v] of inHeaders.entries()) {
+    const key = k.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    // Don't forward CF-specific or encoding negotiation that can cause weirdness.
+    if (key.startsWith('cf-')) continue;
+    if (key === 'accept-encoding') continue;
+    out.set(k, v);
+  }
+
+  // Set a predictable UA (some origins reject empty/worker UA).
+  if (!out.has('user-agent')) {
+    out.set('user-agent', 'convex-worker-proxy/1.0');
+  }
+
+  return out;
+}
+
+function filterResponseHeaders(inHeaders) {
+  const out = new Headers();
+  for (const [k, v] of inHeaders.entries()) {
+    const key = k.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    // Let Cloudflare handle these.
+    if (key === 'content-encoding') continue;
+    if (key === 'content-length') continue;
+    out.set(k, v);
+  }
+  return corsifyHeaders(out);
+}
+
+async function handleRequest(request) {
+  const url = new URL(request.url);
+
+  // Preflight
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: corsifyHeaders(new Headers()) });
+  }
+
+  const raw = (url.searchParams.get('url') || '').trim().replace(/^"|"$/g, '');
+  if (!raw) {
+    return new Response('Missing url parameter', { status: 400, headers: corsifyHeaders(new Headers()) });
+  }
+
+  let target = raw;
+  if (!looksLikeUrl(target)) {
+    const decoded = decodeBase64UrlToString(target).trim().replace(/^"|"$/g, '');
+    if (decoded) target = decoded;
+  }
+
+  if (!looksLikeUrl(target)) {
+    return new Response('Invalid url parameter', { status: 400, headers: corsifyHeaders(new Headers()) });
+  }
+
+  let targetUrl;
+  try {
+    targetUrl = new URL(target);
+  } catch {
+    return new Response('Invalid url parameter', { status: 400, headers: corsifyHeaders(new Headers()) });
+  }
+
+  const init = {
+    method: request.method,
+    headers: filterRequestHeaders(request.headers),
+    redirect: 'follow',
+  };
+
+  // Only attach body for methods that can have one.
+  if (!['GET', 'HEAD'].includes(request.method)) {
+    init.body = request.body;
+  }
+
+  let resp;
+  try {
+    resp = await fetch(targetUrl.toString(), init);
+  } catch (e) {
+    return new Response('Upstream fetch failed: ' + (e && e.message ? e.message : String(e)), {
+      status: 502,
+      headers: corsifyHeaders(new Headers()),
+    });
+  }
+
+  const headers = filterResponseHeaders(resp.headers);
+
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
+}
+
 export default {
   fetch(request, env, ctx) {
     return handleRequest(request);
