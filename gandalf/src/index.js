@@ -30,11 +30,21 @@ export default {
 
       // --- CATCH-ALL: Forward everything to Convex ---
       const b64Param = url.searchParams.get("url");
+      const siteParam = url.searchParams.get("site");
+      const pathParam = url.searchParams.get("path");
       let convexUrl;
 
       if (b64Param) {
         // Already has URL param, just pass to convex
         convexUrl = `https://convex.buengx.workers.dev/?url=${b64Param}`;
+      } else if (siteParam || pathParam) {
+        // Split site+path base64url params, forward directly to convex (convex handles missing param errors)
+        const corsParam = url.searchParams.get("cors");
+        const convexBase = new URL('https://convex.buengx.workers.dev/');
+        if (siteParam) convexBase.searchParams.set('site', siteParam);
+        if (pathParam) convexBase.searchParams.set('path', pathParam);
+        if (corsParam) convexBase.searchParams.set('cors', corsParam);
+        convexUrl = convexBase.toString();
       } else {
         // Catch-all: reconstruct target URL from path + query (minus pw)
         const queryWithoutPw = url.search.replace(/[?&]pw=[^&]*/g, '').replace(/^&/, '?');
