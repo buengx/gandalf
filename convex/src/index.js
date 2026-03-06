@@ -223,7 +223,7 @@ function parseRequestTarget(reqUrl) {
   return { fullUrl: decoded, siteOrigin, path, mode: 'url' };
 }
 
-// Rewrite any discovered link to split-style (site+path b64url)
+// Rewrite discovered link to split-style (site+path base64url).
 function rewriteAttrToSplit(raw, currentSiteOrigin, requestOrigin, corsEnabled) {
   if (!raw) return raw;
   const trimmed = raw.trim();
@@ -402,6 +402,7 @@ async function handleRequest(request) {
   const currentSiteOrigin = upstreamUrl.origin;
   const requestOrigin = reqUrl.origin;
 
+  // binary/media passthrough
   if (isLikelyBinary(contentType) && !isHtml(contentType)) {
     return new Response(upstream.body, {
       status: upstream.status,
@@ -410,6 +411,7 @@ async function handleRequest(request) {
     });
   }
 
+  // HTML rewrite
   if (isHtml(contentType)) {
     headers.set('content-type', contentType);
 
@@ -441,6 +443,7 @@ async function handleRequest(request) {
     );
   }
 
+  // other text rewrite (safe-ish)
   if (isTextLike(contentType)) {
     let text;
     try {
@@ -463,6 +466,7 @@ async function handleRequest(request) {
     });
   }
 
+  // unknown passthrough
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
